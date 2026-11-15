@@ -36,7 +36,7 @@ Sem app, sem nuvem de terceiros no meio: o seu painel, na sua rede, com os seus 
 - **Comportamento** de cada tomada: temporizador, estado ao voltar a energia, LED indicador, bloqueio infantil.
 - **Brilho, cor e temperatura** para lâmpadas compatíveis.
 - **Cenas** "toque para executar" da sua conta.
-- **Agendamentos** por dia da semana e horário (via API Cloud oficial da Tuya), que **sincronizam com o app**.
+- **Agendamentos** por dia da semana e horário (via API Cloud oficial da Tuya), executados na nuvem da Tuya. São **independentes** dos agendamentos criados no app.
 - **Histórico da nuvem** — ao iniciar, importa ~7 dias de consumo e potência direto da Tuya.
 - **Login próprio** por e-mail e senha, tema claro/escuro, e layout que funciona no celular.
 
@@ -55,7 +55,7 @@ Sem app, sem nuvem de terceiros no meio: o seu painel, na sua rede, com os seus 
 
 <p align="center">
   <img src="docs/screenshots/agendamentos.png" width="880" alt="Agendamentos" />
-  <br/><sub>Agendamentos por dia e horário, que sincronizam com o app.</sub>
+  <br/><sub>Agendamentos por dia e horário, executados na nuvem da Tuya.</sub>
 </p>
 
 <p align="center">
@@ -73,7 +73,7 @@ Assistant. **Nenhuma senha da Tuya passa pelo painel.** São dois canais, cada u
 | Canal | Para quê | Como |
 | --- | --- | --- |
 | **Device Sharing SDK** | Controle e leitura em tempo real | `tuya-device-sharing-sdk` (REST + MQTT), login por QR |
-| **API Cloud oficial** | Agendamentos (timers que sincronizam com o app) | `openapi.tuyaus.com`, assinatura HMAC-SHA256 |
+| **API Cloud oficial** | Agendamentos e histórico de consumo (7 dias) | `openapi.tuyaus.com`, assinatura HMAC-SHA256 |
 
 O histórico de consumo é **gravado pelo próprio painel** a partir das leituras (a nuvem não fornece o
 histórico por essa via). Períodos em que o painel não estava rodando aparecem vazios, nunca como zero.

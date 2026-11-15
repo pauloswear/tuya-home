@@ -794,7 +794,7 @@ async function viewDevice(view, d, soft) {
       </section>
       ${S.auth?.schedules && mainSwitch(d) ? `
       <section class="panel span-12" aria-labelledby="hSched">
-        <header><h2 id="hSched">Agendamentos</h2><span class="meta">por dia e horário · sincroniza com o app</span></header>
+        <header><h2 id="hSched">Agendamentos</h2><span class="meta">por dia e horário</span></header>
         <div id="schedWrap"><p class="note">Carregando…</p></div>
       </section>` : ""}
       <section class="panel span-12" aria-labelledby="hInfo">
@@ -872,13 +872,14 @@ async function loadSchedules(view, d) {
         <button class="btn primary" type="submit">Adicionar</button>
       </div>
     </form>
-    <p class="note" id="schedMsg" role="alert" style="min-height:18px;margin-top:6px"></p>`;
+    <p class="note" id="schedMsg" role="alert" style="min-height:18px;margin-top:6px"></p>
+    <p class="note" style="margin-top:4px">Agendamentos do painel, executados na nuvem da Tuya. São independentes dos agendamentos criados no app.</p>`;
 
   wrap.querySelectorAll("#schedDays [data-day]").forEach((b) => (b.onclick = () => b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true")));
   const actSeg = wrap.querySelector(".sched-act .seg");
   actSeg.querySelectorAll("button").forEach((b) => (b.onclick = () => actSeg.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", x === b))));
   wrap.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
-    if (!(await confirmDialog({ title: "Apagar agendamento?", body: "Ele será removido da tomada e do app.", confirm: "Apagar", danger: true }))) return;
+    if (!(await confirmDialog({ title: "Apagar agendamento?", body: "Ele será removido da tomada.", confirm: "Apagar", danger: true }))) return;
     try { await api(`/api/schedules/${encodeURIComponent(d.id)}/${encodeURIComponent(b.dataset.del)}?category=${encodeURIComponent(b.dataset.cat)}`, { method: "DELETE" }); toast("Agendamento apagado"); loadSchedules(view, d); }
     catch (e) { toast(e.message, true); }
   }));
@@ -901,7 +902,7 @@ function schedRow(s) {
   return `<div class="row sched-row">
     <span class="sched-time num">${esc(s.time || "—")}</span>
     <span class="grow"><b>${act}</b><span class="sub">${esc(loopsText(s.loops))}${s.alias ? " · " + esc(s.alias) : ""}${s.enabled ? "" : " · desativado"}</span></span>
-    ${s.editable ? `<button class="btn ghost icon-del" data-del="${esc(s.group_id)}" data-cat="${esc(s.category)}" aria-label="Apagar agendamento">${I.close}</button>` : '<span class="pill">do app</span>'}
+    ${s.editable ? `<button class="btn ghost icon-del" data-del="${esc(s.group_id)}" data-cat="${esc(s.category)}" aria-label="Apagar agendamento">${I.close}</button>` : '<span class="pill">externo</span>'}
   </div>`;
 }
 
