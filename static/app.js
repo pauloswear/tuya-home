@@ -792,6 +792,11 @@ async function viewDevice(view, d, soft) {
         <header><h2 id="hBeh">Comportamento</h2></header>
         ${writable.length ? writable.map((x) => control(d, x)).join("") : '<p class="empty-note">Este dispositivo não tem ajustes.</p>'}
       </section>
+      ${S.auth?.schedules && mainSwitch(d) ? `
+      <section class="panel span-12" aria-labelledby="hSched">
+        <header><h2 id="hSched">Agendamentos</h2><span class="meta">por dia e horário · sincroniza com o app</span></header>
+        <div id="schedWrap"><p class="note">Carregando…</p></div>
+      </section>` : ""}
       <section class="panel span-12" aria-labelledby="hInfo">
         <header><h2 id="hInfo">Estado e identificação</h2></header>
         <div class="kv-grid">
@@ -814,19 +819,90 @@ async function viewDevice(view, d, soft) {
   view.querySelector("#revealKey")?.addEventListener("click", () => { S.revealKey = true; route({ soft: true }); });
   wireControls(view, d);
   wireRange(view);
+  if (S.auth?.schedules && mainSwitch(d)) loadSchedules(view, d);
 
   if (d.metering) {
     try {
       const s = await getJSON(`/api/devices/${encodeURIComponent(d.id)}/energy?range=${S.range}`);
       if (!view.isConnected) return;
-      const kwhSeries = s.kwh_estimated, total = s.total_kwh_estimated;
+      const kwhSeries = s.has_measured ? s.kwh_measured : s.kwh_estimated, total = s.has_measured ? s.total_kwh_measured : s.total_kwh_estimated;
       view.querySelector("#kE").innerHTML = fig(F.kwh(total), "kWh");
       view.querySelector("#kECost").textContent = `${F.brl(Math.round(total * 1000) / 1000 * S.tariff)} a ${F.brl(S.tariff)}/kWh`;
       const cu = view.querySelector("#cUse");
       drawKwh(cu, s, kwhSeries, Math.max(240, cu.clientHeight));
-      view.querySelector("#cUseNote").textContent = `Calculado pela potência lida a cada 5 s. Pico de ${F.w(s.peak_power_w) ?? "—"} W no período.`;
+      view.querySelector("#cUseNote").textContent = (s.has_measured ? "Medido pela tomada (importado da nuvem)." : "Calculado pela potência lida a cada 5 s.") + ` Pico de ${F.w(s.peak_power_w) ?? "—"} W no período.`;
     } catch (e) { view.querySelector("#cUse").innerHTML = `<p class="empty-note">Histórico indisponível: ${esc(e.message)}</p>`; }
   }
+}
+
+// ---------------------------------------------------------- agendamentos
+const WD = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]; // loops: índice 0 = segunda
+function loopsText(loops) {
+  const on = [...loops].map((c, i) => (c === "1" ? i : -1)).filter((i) => i >= 0);
+  if (on.length === 7) return "Todos os dias";
+  if (loops === "1111100") return "Dias úteis";
+  if (loops === "0000011") return "Fim de semana";
+  if (on.length === 0) return "Uma vez";
+  return on.map((i) => WD[i]).join(", ");
+}
+async function loadSchedules(view, d) {
+  const wrap = view.querySelector("#schedWrap");
+  if (!wrap) return;
+  let data;
+  try { data = await api(`/api/schedules/${encodeURIComponent(d.id)}`); }
+  catch (e) { wrap.innerHTML = `<p class="empty-note">Não foi possível carregar os agendamentos: ${esc(e.message)}</p>`; return; }
+  if (!view.isConnected) return;
+  const list = data.schedules || [];
+  wrap.innerHTML = `
+    <div class="rows" id="schedRows">
+      ${list.length ? list.map(schedRow).join("") : '<p class="note" style="padding:8px 0">Nenhum agendamento ainda.</p>'}
+    </div>
+    <form id="schedForm" class="sched-form">
+      <div class="sched-when">
+        <input class="input" type="time" id="schedTime" value="07:00" required aria-label="Horário" />
+        <div class="seg" role="group" aria-label="Dias da semana" id="schedDays">
+          ${WD.map((w, i) => `<button type="button" data-day="${i}" aria-pressed="${i < 5}">${w}</button>`).join("")}
+        </div>
+      </div>
+      <div class="sched-act">
+        <div class="seg" role="group" aria-label="Ação">
+          <button type="button" data-val="true" aria-pressed="true">Ligar</button>
+          <button type="button" data-val="false" aria-pressed="false">Desligar</button>
+        </div>
+        <button class="btn primary" type="submit">Adicionar</button>
+      </div>
+    </form>
+    <p class="note" id="schedMsg" role="alert" style="min-height:18px;margin-top:6px"></p>`;
+
+  wrap.querySelectorAll("#schedDays [data-day]").forEach((b) => (b.onclick = () => b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true")));
+  const actSeg = wrap.querySelector(".sched-act .seg");
+  actSeg.querySelectorAll("button").forEach((b) => (b.onclick = () => actSeg.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", x === b))));
+  wrap.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
+    if (!(await confirmDialog({ title: "Apagar agendamento?", body: "Ele será removido da tomada e do app.", confirm: "Apagar", danger: true }))) return;
+    try { await api(`/api/schedules/${encodeURIComponent(d.id)}/${encodeURIComponent(b.dataset.del)}?category=${encodeURIComponent(b.dataset.cat)}`, { method: "DELETE" }); toast("Agendamento apagado"); loadSchedules(view, d); }
+    catch (e) { toast(e.message, true); }
+  }));
+  wrap.querySelector("#schedForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const msg = wrap.querySelector("#schedMsg"); msg.textContent = "";
+    const time = wrap.querySelector("#schedTime").value;
+    const loops = WD.map((_, i) => (wrap.querySelector(`[data-day="${i}"]`).getAttribute("aria-pressed") === "true" ? "1" : "0")).join("");
+    if (!/^[01]{7}$/.test(loops) || loops === "0000000") { msg.textContent = "Escolha pelo menos um dia."; return; }
+    const value = actSeg.querySelector('[aria-pressed="true"]').dataset.val === "true";
+    const btn = e.target.querySelector('button[type="submit"]'); btn.disabled = true;
+    try {
+      await api(`/api/schedules/${encodeURIComponent(d.id)}`, { method: "POST", body: { time, loops, value, alias: "" } });
+      toast("Agendamento criado"); loadSchedules(view, d);
+    } catch (err) { msg.textContent = err.message; btn.disabled = false; }
+  };
+}
+function schedRow(s) {
+  const act = s.value === true ? "Ligar" : s.value === false ? "Desligar" : "—";
+  return `<div class="row sched-row">
+    <span class="sched-time num">${esc(s.time || "—")}</span>
+    <span class="grow"><b>${act}</b><span class="sub">${esc(loopsText(s.loops))}${s.alias ? " · " + esc(s.alias) : ""}${s.enabled ? "" : " · desativado"}</span></span>
+    ${s.editable ? `<button class="btn ghost icon-del" data-del="${esc(s.group_id)}" data-cat="${esc(s.category)}" aria-label="Apagar agendamento">${I.close}</button>` : '<span class="pill">do app</span>'}
+  </div>`;
 }
 
 function displayValue(x) {

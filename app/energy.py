@@ -82,6 +82,16 @@ class EnergyStore:
             return
         self._q(self._insert_ignore(energy_reports).values(device_id=device_id, ts=ts, kwh=kwh))
 
+    def earliest_sample(self, device_id: str) -> float | None:
+        from sqlalchemy import func, select
+        rows = self._q(select(func.min(samples.c.ts)).where(samples.c.device_id == device_id))
+        return rows[0][0] if rows and rows[0][0] is not None else None
+
+    def add_samples_bulk(self, rows: list[dict]):
+        """rows: [{device_id, ts, power_w, voltage_v, current_a}] — sem dedup."""
+        if rows:
+            self._q(insert(samples), rows)
+
     # ------------------------------------------------------------------ leitura
     def series(self, device_id: str, since: float, buckets: int = 96, width: float | None = None) -> dict:
         """Série de potência agregada em ``buckets`` intervalos + kWh por intervalo."""
@@ -150,7 +160,7 @@ class EnergyStore:
         out = {}
         for d in device_ids:
             s = self.series(d, since, buckets=24)
-            out[d] = s["total_kwh_estimated"]
+            out[d] = s["total_kwh_measured"] if s["has_measured"] else s["total_kwh_estimated"]
         return out
 
     def prune(self, keep_days: int = 400):

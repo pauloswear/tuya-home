@@ -37,6 +37,7 @@ Sem app, sem nuvem de terceiros no meio: o seu painel, na sua rede, com os seus 
 - **Brilho, cor e temperatura** para lâmpadas compatíveis.
 - **Cenas** "toque para executar" da sua conta.
 - **Agendamentos** por dia da semana e horário (via API Cloud oficial da Tuya), que **sincronizam com o app**.
+- **Histórico da nuvem** — ao iniciar, importa ~7 dias de consumo e potência direto da Tuya.
 - **Login próprio** por e-mail e senha, tema claro/escuro, e layout que funciona no celular.
 
 <br/>
@@ -51,6 +52,11 @@ Sem app, sem nuvem de terceiros no meio: o seu painel, na sua rede, com os seus 
     <td align="center"><sub>Consumo — por tomada, com custo e projeção</sub></td>
   </tr>
 </table>
+
+<p align="center">
+  <img src="docs/screenshots/agendamentos.png" width="880" alt="Agendamentos" />
+  <br/><sub>Agendamentos por dia e horário, que sincronizam com o app.</sub>
+</p>
 
 <p align="center">
   <img src="docs/screenshots/mobile.png" width="300" alt="Tuya Dash no celular" />

@@ -43,10 +43,20 @@ class TuyaCloud:
         self._token_exp = 0.0
 
     # ----------------------------------------------------------- assinatura
+    @staticmethod
+    def _canonical_path(path: str) -> str:
+        """A Tuya exige os parâmetros de query ordenados por chave na assinatura."""
+        if "?" not in path:
+            return path
+        base, query = path.split("?", 1)
+        parts = [p for p in query.split("&") if p]
+        parts.sort(key=lambda kv: kv.split("=", 1)[0])
+        return base + "?" + "&".join(parts)
+
     def _sign(self, method: str, path: str, token: str, body: str) -> dict[str, str]:
         t = str(int(time.time() * 1000))
         content_sha = hashlib.sha256(body.encode()).hexdigest() if body else _EMPTY_BODY_SHA
-        string_to_sign = f"{method}\n{content_sha}\n\n{path}"
+        string_to_sign = f"{method}\n{content_sha}\n\n{self._canonical_path(path)}"
         message = self.access_id + token + t + string_to_sign
         sign = hmac.new(self.secret.encode(), message.encode(), hashlib.sha256).hexdigest().upper()
         headers = {
@@ -107,32 +117,52 @@ class TuyaCloud:
         return res.get("devices", []) if isinstance(res, dict) else []
 
     # ------------------------------------------------------------- timers
-    # Categoria = agrupador do app. Usamos uma por tomada+DP para isolar nossos
-    # agendamentos; o app lista todas as categorias juntas, então sincroniza.
-    def list_timers(self, device_id: str, category: str) -> dict:
-        return self.request("GET", f"/v1.0/devices/{device_id}/timers/category?category={category}")
+    # Formatos confirmados ao vivo (API "Device Timing Management"):
+    #   GET  /v1.0/devices/{id}/timers
+    #     -> [ {category:{category,status}, groups:[{id, timers:[
+    #            {timer_id, time, loops, date, functions:[{code,value}], status, alias_name, timezone_id} ]}]} ]
+    #   POST /v1.0/devices/{id}/timers  (corpo abaixo)  -> {group_id}
+    #   DELETE /v1.0/devices/{id}/timers  corpo {category, group_id}
+    # loops: 7 dígitos seg..dom (índice 0 = segunda); "0100000" = terça.
+    def list_timers(self, device_id: str) -> list:
+        res = self.request("GET", f"/v1.0/devices/{device_id}/timers")
+        return res if isinstance(res, list) else []
 
     def add_timer(self, device_id: str, category: str, *, time_hm: str, loops: str,
                   instruct: list[dict], timezone_id: str = "America/Sao_Paulo",
-                  alias_name: str = "", is_appoint: bool = False) -> Any:
+                  time_zone: str = "-03:00", alias_name: str = "") -> Any:
         body = {
             "category": category,
-            "loops": loops,            # 7 bits dom..sáb, ex.: "0111110"
-            "instruct": instruct,      # [{"code":"switch_1","value":True}]
-            "time": time_hm,           # "HH:MM" 24h
-            "timezone_id": timezone_id,
-            "is_appoint": is_appoint,
+            "loops": loops,                 # 7 dígitos seg..dom
+            "time_zone": time_zone,         # offset, ex.: "-03:00"
+            "timezone_id": timezone_id,     # IANA, ex.: "America/Sao_Paulo"
+            "instruct": [{"time": time_hm, "functions": instruct}],
         }
         if alias_name:
             body["alias_name"] = alias_name
         return self.request("POST", f"/v1.0/devices/{device_id}/timers", body)
 
-    def set_timer_status(self, device_id: str, category: str, group_id: str | int, enable: bool) -> Any:
-        body = {"category": category, "status": 1 if enable else 0}
-        return self.request("PUT", f"/v1.0/devices/{device_id}/timers/{group_id}", body)
+    def delete_timer(self, device_id: str, category: str, group_id: str) -> Any:
+        return self.request("DELETE", f"/v1.0/devices/{device_id}/timers",
+                            {"category": category, "group_id": group_id})
 
-    def delete_timer(self, device_id: str, category: str, group_id: str | int) -> Any:
-        return self.request("DELETE", f"/v1.0/devices/{device_id}/timers/groups/{group_id}?category={category}")
+    # ------------------------------------------------------- histórico (logs)
+    def report_logs(self, device_id: str, codes: str, start_ms: int, end_ms: int,
+                    max_pages: int = 60) -> list[dict]:
+        """Histórico bruto dos DPs (a nuvem guarda ~7 dias). Pagina com last_row_key."""
+        out: list[dict] = []
+        key = None
+        for _ in range(max_pages):
+            path = (f"/v1.0/devices/{device_id}/report-logs?codes={codes}"
+                    f"&end_time={end_ms}&size=100&start_time={start_ms}")
+            if key:
+                path += f"&last_row_key={key}"
+            res = self.request("GET", path)
+            out.extend(res.get("logs", []))
+            key = res.get("last_row_key")
+            if not res.get("has_more") or not key:
+                break
+        return out
 
 
 def from_env(env: dict) -> TuyaCloud | None:

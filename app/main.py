@@ -63,8 +63,65 @@ async def lifespan(app: FastAPI):
         service.last_error = str(e)
         log.exception("não foi possível conectar com a sessão salva")
     threading.Thread(target=service.poll_forever, daemon=True).start()
+    if cloud is not None:
+        threading.Thread(target=backfill_cloud_history, daemon=True).start()
     yield
     service.stop()
+
+
+# Escalas dos DPs de medição (valor bruto -> unidade)
+_LOG_SCALE = {"add_ele": 1000.0, "cur_power": 10.0, "cur_voltage": 10.0, "cur_current": 1000.0}
+
+
+def backfill_cloud_history(days: int = 7):
+    """Puxa da nuvem (report-logs, ~7 dias) o histórico real de energia e potência.
+
+    Energia (add_ele) é sempre reimportada — deduplicada por timestamp. A potência só
+    preenche o período anterior ao que o painel já gravou, para não duplicar amostras.
+    """
+    if cloud is None or not service.connected:
+        return
+    now_ms = int(time.time() * 1000)
+    start_ms = now_ms - days * 86400 * 1000
+    for d in service.devices():
+        if not d.get("metering"):
+            continue
+        did = d["id"]
+        try:
+            n_ele = 0
+            for e in cloud.report_logs(did, "add_ele", start_ms, now_ms):
+                try:
+                    service.energy.add_energy(did, float(e["value"]) / _LOG_SCALE["add_ele"],
+                                              int(e["event_time"]) / 1000.0)
+                    n_ele += 1
+                except (ValueError, KeyError, TypeError):
+                    pass
+            earliest = service.energy.earliest_sample(did)
+            end_p = int((earliest - 1) * 1000) if earliest else now_ms
+            n_s = 0
+            if end_p > start_ms:
+                by_ts: dict[int, dict] = {}
+                for e in cloud.report_logs(did, "cur_power,cur_voltage,cur_current", start_ms, end_p):
+                    try:
+                        ts = int(e["event_time"]) / 1000.0
+                        v = float(e["value"])
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                    row = by_ts.setdefault(round(ts), {"device_id": did, "ts": ts,
+                                                       "power_w": None, "voltage_v": None, "current_a": None})
+                    sc = _LOG_SCALE.get(e["code"])
+                    if e["code"] == "cur_power":
+                        row["power_w"] = v / sc
+                    elif e["code"] == "cur_voltage":
+                        row["voltage_v"] = v / sc
+                    elif e["code"] == "cur_current":
+                        row["current_a"] = v / sc
+                rows = [r for r in by_ts.values() if r["power_w"] is not None or r["voltage_v"] is not None]
+                service.energy.add_samples_bulk(rows)
+                n_s = len(rows)
+            log.info("backfill nuvem %s (%s): %d energia, %d potência", d["name"], did, n_ele, n_s)
+        except Exception as e:  # noqa: BLE001
+            log.warning("backfill da nuvem falhou para %s: %s", did, e)
 
 
 app = FastAPI(title="Tuya Dash", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -307,7 +364,7 @@ def energy_total(range: str = "24h"):
     out = None
     for i in ids:
         s = service.energy.series(i, since, buckets, width)
-        kwh = s["kwh_estimated"]
+        kwh = s["kwh_measured"] if s["has_measured"] else s["kwh_estimated"]
         if out is None:
             out = {"since": s["since"], "until": s["until"], "bucket_seconds": s["bucket_seconds"],
                    "avg_power_w": [None] * buckets, "kwh": [None] * buckets, "samples": 0}
@@ -339,8 +396,8 @@ async def trigger(home_id: str, scene_id: str):
 
 
 # ------------------------------------------------------------- agendamentos
-# Via API Cloud oficial da Tuya; sincronizam com os agendamentos do app.
-WEEKDAYS = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"]  # loops: 7 bits, índice 0 = domingo
+# API Cloud oficial da Tuya (Device Timing Management). loops: 7 dígitos seg..dom.
+CATEGORY = "schedule"  # categoria dos agendamentos criados pelo painel
 
 
 def _require_cloud():
@@ -361,46 +418,39 @@ def _switch_code(device_id: str) -> str:
     return "switch_1"
 
 
-def _category(device_id: str) -> str:
-    """Categoria usada para nossos agendamentos (o app agrupa timers por categoria)."""
-    return _switch_code(device_id)
-
-
-def _norm_timer(group: dict, code: str) -> dict:
-    """Normaliza um grupo de timer da Tuya para o formato do painel."""
-    out = []
-    for t in group.get("timers", []):
-        funcs = t.get("functions") or t.get("instruct") or []
-        value = None
-        for f in funcs:
-            if f.get("code") == code:
-                value = f.get("value")
-        out.append({
-            "timer_id": t.get("timer_id") or t.get("id"),
-            "time": t.get("time"),
-            "loops": t.get("loops", "0000000"),
-            "value": value,
-            "enabled": bool(t.get("status", 1)) if "status" in t else True,
-        })
-    return {"group_id": group.get("group_id") or group.get("id"), "category": group.get("category"), "timers": out}
-
-
 @app.get("/api/schedules/{device_id}")
 async def list_schedules(device_id: str):
+    """Lista todos os agendamentos da nuvem, achatando categoria→grupos→timers."""
     _require_cloud()
     code = _switch_code(device_id)
     try:
-        res = await run_in_threadpool(cloud.request, "GET", f"/v1.0/devices/{device_id}/timers")
+        cats = await run_in_threadpool(cloud.list_timers, device_id)
     except TuyaCloudError as e:
         raise HTTPException(502, e.msg) from e
-    groups = res.get("groups", res) if isinstance(res, dict) else res
-    norm = [_norm_timer(g, code) for g in (groups or [])]
-    return {"device_id": device_id, "switch_code": code, "groups": norm}
+    items = []
+    for cat in cats or []:
+        cname = (cat.get("category") or {}).get("category") if isinstance(cat.get("category"), dict) else cat.get("category")
+        for grp in cat.get("groups", []):
+            for t in grp.get("timers", []):
+                value = next((f.get("value") for f in t.get("functions", []) if f.get("code") == code), None)
+                items.append({
+                    "group_id": grp.get("id"),
+                    "category": cname,
+                    "time": t.get("time"),
+                    "loops": t.get("loops", "0000000"),
+                    "value": value,
+                    "action_code": code,
+                    "enabled": t.get("status", 1) == 1,
+                    "alias": t.get("alias_name", ""),
+                    "editable": cname == CATEGORY and value is not None,
+                })
+    items.sort(key=lambda x: (x["time"] or ""))
+    return {"device_id": device_id, "switch_code": code, "schedules": items}
 
 
 class ScheduleBody(BaseModel):
     time: str = Field(pattern=r"^\d{2}:\d{2}$")
-    loops: str = Field(pattern=r"^[01]{7}$")
+    loops: str = Field(pattern=r"^[01]{7}$")  # seg..dom
     value: bool
     alias: str = Field(default="", max_length=64)
 
@@ -408,10 +458,12 @@ class ScheduleBody(BaseModel):
 @app.post("/api/schedules/{device_id}")
 async def add_schedule(device_id: str, body: ScheduleBody):
     _require_cloud()
+    if body.loops == "0000000":
+        raise HTTPException(400, "Escolha pelo menos um dia da semana.")
     code = _switch_code(device_id)
     try:
         await run_in_threadpool(
-            cloud.add_timer, device_id, _category(device_id),
+            cloud.add_timer, device_id, CATEGORY,
             time_hm=body.time, loops=body.loops,
             instruct=[{"code": code, "value": body.value}], alias_name=body.alias,
         )
@@ -420,21 +472,11 @@ async def add_schedule(device_id: str, body: ScheduleBody):
     return {"ok": True}
 
 
-@app.put("/api/schedules/{device_id}/{group_id}")
-async def toggle_schedule(device_id: str, group_id: str, enable: bool = True):
-    _require_cloud()
-    try:
-        await run_in_threadpool(cloud.set_timer_status, device_id, _category(device_id), group_id, enable)
-    except TuyaCloudError as e:
-        raise HTTPException(502, e.msg) from e
-    return {"ok": True}
-
-
 @app.delete("/api/schedules/{device_id}/{group_id}")
-async def remove_schedule(device_id: str, group_id: str):
+async def remove_schedule(device_id: str, group_id: str, category: str = CATEGORY):
     _require_cloud()
     try:
-        await run_in_threadpool(cloud.delete_timer, device_id, _category(device_id), group_id)
+        await run_in_threadpool(cloud.delete_timer, device_id, category, group_id)
     except TuyaCloudError as e:
         raise HTTPException(502, e.msg) from e
     return {"ok": True}
