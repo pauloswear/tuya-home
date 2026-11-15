@@ -1,0 +1,37 @@
+# Sobe o painel Tuya Dash.
+#   docker compose up -d                 → só o painel (usa o MySQL do seu .env)
+#   docker compose --profile db up -d    → painel + MariaDB embutido
+#
+# Segredos (MySQL, Tuya Cloud) vêm do arquivo .env — copie de .env.example.
+
+services:
+  app:
+    build: .
+    image: tuya-dash
+    container_name: tuya-dash
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TUYA_DASH_DATA: /app/data
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./data:/app/data       # sessão Tuya (config.json) e SQLite de reserva
+    # Para usar o MariaDB embutido abaixo, no .env defina MYSQL_HOST=db e MYSQL_PORT=3306.
+
+  # MariaDB opcional (só sobe com: --profile db). Se você já tem um banco, ignore.
+  db:
+    image: mariadb:11
+    container_name: tuya-dash-db
+    profiles: ["db"]
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MYSQL_PASSWORD:-change-me}
+      MARIADB_DATABASE: ${MYSQL_DATABASE:-tuya-dash}
+    volumes:
+      - db_data:/var/lib/mysql
+    # exponha a porta só se quiser acessar o banco de fora do compose:
+    # ports: ["3306:3306"]
+
+volumes:
+  db_data:

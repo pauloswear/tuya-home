@@ -1,0 +1,13 @@
+.venv/
+data/
+.env
+.git/
+.gitignore
+.taste-skill/
+__pycache__/
+*.pyc
+*.sqlite3*
+*.db
+*.migrated
+README.md
+AGENTS.md
