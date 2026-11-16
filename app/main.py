@@ -328,6 +328,35 @@ async def send_commands(device_id: str, body: CommandBody):
     return {"ok": True}
 
 
+class ParentBody(BaseModel):
+    parent_id: str | None = Field(default=None, max_length=64)
+
+
+@app.post("/api/devices/{device_id}/parent")
+async def set_parent(device_id: str, body: ParentBody):
+    """Marca a tomada como ligada dentro de outra (ou de volta direto na parede)."""
+    _require()
+    try:
+        dev = service.device(device_id)
+        par = service.device(body.parent_id) if body.parent_id else None
+    except KeyError as e:
+        raise HTTPException(404, "dispositivo não encontrado") from e
+    if not service.metering(dev) or (par and not service.metering(par)):
+        raise HTTPException(400, "Só dá para aninhar tomadas que medem consumo.")
+    if par and par.id == device_id:
+        raise HTTPException(400, "Uma tomada não pode estar dentro dela mesma.")
+    if par:
+        # sem ciclos: a de fora não pode estar (direta ou indiretamente) dentro desta
+        parents, cur = service.energy.parents(), par.id
+        while cur:
+            if cur == device_id:
+                raise HTTPException(400, f"“{par.name}” já está ligada dentro de “{dev.name}”.")
+            cur = parents.get(cur)
+    await run_in_threadpool(service.energy.set_parent, device_id, par.id if par else None)
+    service._broadcast({"type": "reload"})
+    return {"ok": True, "parent_id": par.id if par else None}
+
+
 # -------------------------------------------------------------------- energy
 @app.get("/api/devices/{device_id}/energy")
 def device_energy(device_id: str, range: str = "24h"):
@@ -336,31 +365,62 @@ def device_energy(device_id: str, range: str = "24h"):
     return service.energy.series(device_id, since, buckets, width)
 
 
+def _nesting(metered: list[dict]) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Pais válidos (só entre tomadas com medição presentes) e filhos diretos de cada uma.
+    Uma tomada cujo pai sumiu da conta volta a contar como de fora."""
+    ids = {d["id"] for d in metered}
+    parent = {d["id"]: d["parent_id"] for d in metered if d.get("parent_id") in ids}
+    children: dict[str, list[str]] = {}
+    for c, p in parent.items():
+        children.setdefault(p, []).append(c)
+    return parent, children
+
+
+def _own(value: float | None, kids: list[float | None]) -> float | None:
+    """Parte da medição que é só da tomada (sem as de dentro). Nunca negativa: as
+    medições não são simultâneas, então a diferença pode oscilar um pouco abaixo de zero."""
+    if value is None:
+        return None
+    return max(0.0, value - sum(k or 0 for k in kids))
+
+
 @app.get("/api/energy/summary")
 def energy_summary(range: str = "24h"):
     _require()
     since, _, _ = window(range)
     metered = [d for d in service.devices() if d["metering"]]
+    parent, children = _nesting(metered)
     totals = service.energy.totals([d["id"] for d in metered], since)
+    power = {d["id"]: (d["metering"] or {}).get("power_w") if d["online"] else None for d in metered}
+    out = []
+    for d in metered:
+        kids = children.get(d["id"], [])
+        kwh = totals.get(d["id"], 0)
+        own_kwh = _own(kwh, [totals.get(k, 0) for k in kids])
+        own_w = _own(power[d["id"]], [power[k] for k in kids])
+        out.append({"id": d["id"], "name": d["name"], "kwh": kwh, "power_w": (d["metering"] or {}).get("power_w"),
+                    "parent_id": parent.get(d["id"]), "children": kids,
+                    "own_kwh": round(own_kwh, 4), "own_power_w": None if own_w is None else round(own_w, 1)})
+    top = [d["id"] for d in metered if d["id"] not in parent]
     return {
         "range": range,
         "since": since,
-        "devices": [
-            {"id": d["id"], "name": d["name"], "kwh": totals.get(d["id"], 0),
-             "power_w": (d["metering"] or {}).get("power_w")}
-            for d in metered
-        ],
-        "total_kwh": round(sum(totals.values()), 4),
-        "total_power_w": round(sum((d["metering"] or {}).get("power_w") or 0 for d in metered), 1),
+        "devices": out,
+        # só as tomadas de fora: o consumo das de dentro já está na medição delas
+        "total_kwh": round(sum(totals.get(i, 0) for i in top), 4),
+        "total_power_w": round(sum(power[i] or 0 for i in top), 1),
     }
 
 
 @app.get("/api/energy/total")
 def energy_total(range: str = "24h"):
-    """Soma das séries de todas as tomadas com medição (potência média e kWh por intervalo)."""
+    """Soma das séries das tomadas com medição (potência média e kWh por intervalo).
+    Tomadas ligadas dentro de outra ficam de fora: já estão na medição da de fora."""
     _require()
     since, buckets, width = window(range)
-    ids = [d["id"] for d in service.devices() if d["metering"]]
+    metered = [d for d in service.devices() if d["metering"]]
+    parent, _ = _nesting(metered)
+    ids = [d["id"] for d in metered if d["id"] not in parent]
     out = None
     for i in ids:
         s = service.energy.series(i, since, buckets, width)

@@ -106,6 +106,13 @@ const firstDp = (dev, codes) => codes.map((c) => dp(dev, c)).find(Boolean);
 const mainSwitch = (dev) => firstDp(dev, ["switch_led", "switch_1", "switch", "switch_2"]);
 const isOn = (dev) => !!mainSwitch(dev)?.value;
 const powerOf = (dev) => (dev.online ? dev.metering?.power_w ?? null : null);
+// tomadas aninhadas: uma ligada dentro de outra (ex.: Ventilador numa régua na tomada Quarto).
+// A de dentro já está na medição da de fora, então só as de fora entram nos totais.
+const parentOf = (d) => { const p = d.parent_id && S.devices.get(d.parent_id); return p && p.metering ? p : null; };
+const childrenOf = (d) => [...S.devices.values()].filter((c) => c.metering && c.parent_id === d.id);
+const isTop = (d) => !parentOf(d);
+// potência só desta tomada, sem as de dentro (nunca negativa: as leituras não são simultâneas)
+const ownPowerOf = (d) => { const p = powerOf(d); return p == null ? null : Math.max(0, p - childrenOf(d).reduce((s, c) => s + (powerOf(c) || 0), 0)); };
 const sorted = () => [...S.devices.values()].sort((a, b) => (powerOf(b) ?? -1) - (powerOf(a) ?? -1) || a.name.localeCompare(b.name, "pt-BR"));
 
 // ------------------------------------------------------------------ ícones (contorno 1,5px)
@@ -645,7 +652,7 @@ function outletRows(devs) {
     const brl = kwh == null ? null : Math.round(kwh * S.tariff * 100) / 100;
     return `<tr data-href="#/tomada/${encodeURIComponent(d.id)}">
       <td>${sw ? toggleHtml(d, sw) : ""}</td>
-      <td class="name-cell"><a href="#/tomada/${encodeURIComponent(d.id)}"><b>${esc(d.name)}</b></a><span class="sub">${d.online ? (sw ? (sw.value ? "Ligada" : "Desligada") : esc(d.category_label)) : '<span class="pill">offline</span>'}${d.room ? " · " + esc(d.room) : ""}</span></td>
+      <td class="name-cell"><a href="#/tomada/${encodeURIComponent(d.id)}"><b>${esc(d.name)}</b></a><span class="sub">${d.online ? (sw ? (sw.value ? "Ligada" : "Desligada") : esc(d.category_label)) : '<span class="pill">offline</span>'}${d.room ? " · " + esc(d.room) : ""}${parentOf(d) ? ` · dentro de ${esc(parentOf(d).name)}` : ""}</span></td>
       <td class="n num">${d.online ? cell(F.w(p), "W") : '<span class="dash">—</span>'}</td>
       <td class="n num hide-sm">${d.online ? cell(F.v(m.voltage_v), "V") : '<span class="dash">—</span>'}</td>
       <td class="n num">${kwh == null ? '<span class="dash">—</span>' : kwh ? cell(F.kwh(kwh), "kWh") : '<span class="zero">0 kWh</span>'}</td>
@@ -661,12 +668,15 @@ function wireOutlets(view) {
 async function viewOverview(view, soft) {
   const devs = sorted();
   const metered = devs.filter((d) => d.metering);
-  const total = metered.reduce((s, d) => s + (powerOf(d) || 0), 0);
-  const top = metered.find((d) => powerOf(d) > 0);
+  const total = metered.filter(isTop).reduce((s, d) => s + (powerOf(d) || 0), 0);
+  // divisão sem contar em dobro: cada tomada entra com a parte só dela
+  const parts = metered.map((d) => ({ d, w: ownPowerOf(d), name: childrenOf(d).length ? `${d.name} (resto)` : d.name }))
+    .filter((x) => x.w > 0).sort((a, b) => b.w - a.w);
+  const top = parts[0];
   const onCount = devs.filter(isOn).length;
   const offline = devs.filter((d) => !d.online);
   const finding = top && total > 0
-    ? `<b>${esc(top.name)}</b> puxa ${F.pct(powerOf(top) / total)} da potência agora: ${F.w(powerOf(top))} de ${F.w(total)} W.`
+    ? `<b>${esc(top.name)}</b> puxa ${F.pct(top.w / total)} da potência agora: ${F.w(top.w)} de ${F.w(total)} W.`
     : "Nenhuma tomada está consumindo agora.";
   const offlineNote = offline.length ? ` ${offline.map((d) => esc(d.name)).join(", ")} ${offline.length > 1 ? "estão" : "está"} offline.` : "";
 
@@ -683,8 +693,8 @@ async function viewOverview(view, soft) {
     </section>
     <section class="panel" style="margin-bottom:var(--gap)" aria-labelledby="hSplit">
       <header><h2 id="hSplit">Para onde vai a potência agora</h2><span class="meta num">${fig(F.w(total), "W")} no total</span></header>
-      ${total > 0 ? `<div class="split" role="img" aria-label="Divisão da potência entre as tomadas">${metered.filter((d) => powerOf(d) > 0).map((d, i) => `<i class="${i === 0 ? "lead" : ""}" style="flex:${powerOf(d)}" title="${esc(d.name)}: ${F.w(powerOf(d))} W"></i>`).join("")}</div>
-        <div class="split-legend">${metered.filter((d) => powerOf(d) > 0).map((d, i) => `<span><i class="sw ${i === 0 ? "lead" : ""}"></i>${esc(d.name)} <b>${F.w(powerOf(d))} W</b> · ${F.pct(powerOf(d) / total)}</span>`).join("")}</div>`
+      ${total > 0 ? `<div class="split" role="img" aria-label="Divisão da potência entre as tomadas">${parts.map((x, i) => `<i class="${i === 0 ? "lead" : ""}" style="flex:${x.w}" title="${esc(x.name)}: ${F.w(x.w)} W"></i>`).join("")}</div>
+        <div class="split-legend">${parts.map((x, i) => `<span><i class="sw ${i === 0 ? "lead" : ""}"></i>${esc(x.name)} <b>${F.w(x.w)} W</b> · ${F.pct(x.w / total)}</span>`).join("")}</div>`
         : '<p class="empty-note">Todas as tomadas estão em 0 W.</p>'}
     </section>
     <div class="grid top">
@@ -726,8 +736,9 @@ async function viewOverview(view, soft) {
     if (!view.isConnected) return;
     // the total is the sum of the rows as shown
     const rows = sum.devices.map((r) => ({ ...r, kwhR: Math.round(r.kwh * 1000) / 1000 }));
-    const kwh = rows.reduce((s, r) => s + r.kwhR, 0);
-    const cost = rows.reduce((s, r) => s + Math.round(r.kwhR * S.tariff * 100) / 100, 0);
+    const outer = rows.filter((r) => !r.parent_id); // as de dentro já estão na medição da de fora
+    const kwh = outer.reduce((s, r) => s + r.kwhR, 0);
+    const cost = outer.reduce((s, r) => s + Math.round(r.kwhR * S.tariff * 100) / 100, 0);
     view.querySelector("#kToday").innerHTML = fig(F.kwh(kwh), "kWh");
     view.querySelector("#kCost").innerHTML = F.brl(cost);
     view.querySelector("#kProj").innerHTML = F.brl((total / 1000) * 24 * 30 * S.tariff);
@@ -764,12 +775,13 @@ async function viewDevice(view, d, soft) {
   if (!S.detail[d.id]) api(`/api/devices/${encodeURIComponent(d.id)}`).then((x) => { S.detail[d.id] = x; scheduleRender(); }).catch(() => {});
   const info = S.detail[d.id];
   const status = !d.online ? "offline" : sw ? (sw.value ? "ligada" : "desligada") : "online";
+  const kids = d.metering ? childrenOf(d) : [];
 
   view.innerHTML = `
     <div class="title-row">
       <div class="with-back"><button class="btn back" id="backBtn" aria-label="Voltar">${I.back}</button>
       <div><h1>${esc(d.name)}</h1>
-        <p class="sub">${esc(d.category_label)}${d.room ? " · " + esc(d.room) : ""} · ${status}. ${d.online && p != null ? `Puxando <b>${F.w(p)} W</b> agora.` : ""}</p></div>
+        <p class="sub">${esc(d.category_label)}${d.room ? " · " + esc(d.room) : ""} · ${status}. ${d.online && p != null ? `Puxando <b>${F.w(p)} W</b> agora.` : ""}${kids.length ? ` A medição inclui ${kids.map((c) => esc(c.name)).join(", ")}.` : ""}</p></div>
       </div>
       <div class="title-actions">${sw ? `<label class="power-switch" for="powerToggle"><span>${!d.online ? "Offline" : sw.value ? "Ligada" : "Desligada"}</span>
         <span class="toggle big"><input type="checkbox" id="powerToggle" data-toggle="${esc(d.id)}" ${sw.value ? "checked" : ""} ${d.online ? "" : "disabled"} aria-label="${sw.value ? "Desligar" : "Ligar"} ${esc(d.name)}"><span></span></span></label>` : ""}</div>
@@ -790,7 +802,8 @@ async function viewDevice(view, d, soft) {
       </section>` : ""}
       <section class="panel ${d.metering ? "span-4" : "span-8"}" aria-labelledby="hBeh">
         <header><h2 id="hBeh">Comportamento</h2></header>
-        ${writable.length ? writable.map((x) => control(d, x)).join("") : '<p class="empty-note">Este dispositivo não tem ajustes.</p>'}
+        ${d.metering ? nestControl(d) : ""}
+        ${writable.length ? writable.map((x) => control(d, x)).join("") : d.metering ? "" : '<p class="empty-note">Este dispositivo não tem ajustes.</p>'}
       </section>
       ${S.auth?.schedules && mainSwitch(d) ? `
       <section class="panel span-12" aria-labelledby="hSched">
@@ -818,6 +831,7 @@ async function viewDevice(view, d, soft) {
   wireToggles(view);
   view.querySelector("#revealKey")?.addEventListener("click", () => { S.revealKey = true; route({ soft: true }); });
   wireControls(view, d);
+  wireNest(view, d);
   wireRange(view);
   if (S.auth?.schedules && mainSwitch(d)) loadSchedules(view, d);
 
@@ -833,6 +847,32 @@ async function viewDevice(view, d, soft) {
       view.querySelector("#cUseNote").textContent = (s.has_measured ? "Medido pela tomada (importado da nuvem)." : "Calculado pela potência lida a cada 5 s.") + ` Pico de ${F.w(s.peak_power_w) ?? "—"} W no período.`;
     } catch (e) { view.querySelector("#cUse").innerHTML = `<p class="empty-note">Histórico indisponível: ${esc(e.message)}</p>`; }
   }
+}
+
+// ------------------------------------------------------ tomada aninhada
+// "Ligada dentro de": esta tomada está numa régua/extensão ligada em outra tomada que mede.
+function nestControl(d) {
+  const below = new Set([d.id]); // ela e as que estão dentro dela (direta ou indiretamente) não podem ser a de fora
+  for (let grew = true; grew;) { grew = false; for (const c of S.devices.values()) if (c.parent_id && below.has(c.parent_id) && !below.has(c.id)) { below.add(c.id); grew = true; } }
+  const opts = [...S.devices.values()].filter((o) => o.metering && !below.has(o.id)).sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+  const cur = parentOf(d)?.id || "";
+  return `<div class="setting wide"><div><label for="nestSel">Ligada dentro de</label><span class="hint">Numa régua ou extensão ligada em outra tomada que mede? Escolha a de fora para não contar o consumo duas vezes.</span></div>
+    <select class="input" id="nestSel" name="parent" style="justify-self:start">${[`<option value="">Nenhuma (direto na parede)</option>`, ...opts.map((o) => `<option value="${esc(o.id)}" ${o.id === cur ? "selected" : ""}>${esc(o.name)}</option>`)].join("")}</select></div>`;
+}
+function wireNest(root, d) {
+  const sel = root.querySelector("#nestSel");
+  if (!sel) return;
+  sel.onchange = async () => {
+    sel.disabled = true;
+    try {
+      const r = await api(`/api/devices/${encodeURIComponent(d.id)}/parent`, { method: "POST", body: { parent_id: sel.value || null } });
+      S.devices.set(d.id, { ...S.devices.get(d.id), parent_id: r.parent_id });
+      energyCache.clear();
+      toast(r.parent_id ? `${d.name} agora conta dentro de ${S.devices.get(r.parent_id)?.name}` : `${d.name} volta a contar separada`);
+    } catch (e) { toast(e.message, true); }
+    sel.disabled = false; sel.blur();
+    route({ soft: true });
+  };
 }
 
 // ---------------------------------------------------------- agendamentos
@@ -1026,9 +1066,11 @@ async function viewEnergy(view, soft) {
   try {
     const [sum, tot] = await Promise.all([getJSON(`/api/energy/summary?range=${S.range}`), getJSON(`/api/energy/total?range=${S.range}`)]);
     if (!view.isConnected) return;
+    // cada linha entra com a parte só dela: a de fora sem as de dentro, para a soma bater com o total
+    const names = new Map(sum.devices.map((r) => [r.id, r.name]));
     const rows = sum.devices.map((r) => {
-      const kwh = Math.round(r.kwh * 1000) / 1000;
-      return { ...r, kwh, brl: Math.round(kwh * S.tariff * 100) / 100 };
+      const kwh = Math.round((r.children?.length ? r.own_kwh : r.kwh) * 1000) / 1000;
+      return { ...r, measured: Math.round(r.kwh * 1000) / 1000, kwh, brl: Math.round(kwh * S.tariff * 100) / 100 };
     }).sort((a, b) => b.kwh - a.kwh);
     const kwh = rows.reduce((s, r) => s + r.kwh, 0), brl = rows.reduce((s, r) => s + r.brl, 0);
     const covered = tot.avg_power_w.filter((v) => v != null);
@@ -1048,7 +1090,7 @@ async function viewEnergy(view, soft) {
     const max = Math.max(...rows.map((r) => r.kwh), 1e-9);
     view.querySelector("#rank").innerHTML = rows.map((r, i) => `
       <a class="row rank" href="#/tomada/${encodeURIComponent(r.id)}">
-        <span class="grow"><b>${esc(r.name)}</b><span class="sub num">${S.devices.get(r.id)?.online === false ? "offline" : r.power_w == null ? "—" : `${F.w(r.power_w)} W agora`}</span>
+        <span class="grow"><b>${esc(r.name)}</b><span class="sub num">${S.devices.get(r.id)?.online === false ? "offline" : r.power_w == null ? "—" : `${F.w(r.power_w)} W agora`}${r.parent_id ? ` · dentro de ${esc(names.get(r.parent_id))}` : ""}${r.children?.length ? ` · sem ${r.children.map((c) => esc(names.get(c))).join(", ")} (medido ${F.kwh(r.measured)} kWh)` : ""}</span>
           <span class="bar ${i === 0 && r.kwh > 0 ? "lead" : ""}" style="width:${r.kwh > 0 ? Math.max(2, (r.kwh / max) * 100) : 0}%"></span></span>
         <span class="fig">${r.kwh ? `${F.kwh(r.kwh)}<span class="dash"> kWh</span>` : '<span class="zero">0 kWh</span>'}<span class="sub">${F.brl(r.brl)}</span></span>
       </a>`).join("");

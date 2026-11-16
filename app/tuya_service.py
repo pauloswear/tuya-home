@@ -393,6 +393,7 @@ class TuyaService:
             "icon": icon,
             "room": self.rooms.get(device.id),
             "metering": self.metering(device),
+            "parent_id": self.energy.parents().get(device.id),
             "dps": dps,
             "update_time": getattr(device, "update_time", None),
         }

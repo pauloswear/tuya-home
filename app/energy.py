@@ -19,7 +19,7 @@ from pathlib import Path
 
 from sqlalchemy import delete, insert, select
 
-from .db import database_url, energy_reports, make_engine, migrate, samples
+from .db import database_url, device_parents, energy_reports, make_engine, migrate, samples
 
 log = logging.getLogger("tuya-dash")
 
@@ -45,6 +45,7 @@ class EnergyStore:
             migrate(self.engine)
         log.info("histórico de energia em %s (%s)", self.kind, self.engine.url.render_as_string(hide_password=True))
         self._import_legacy(data_dir / "energy.sqlite3")
+        self._parents: dict[str, str] = dict(self._q(select(device_parents.c.device_id, device_parents.c.parent_id)))
 
     def _import_legacy(self, path: Path):
         """Importa uma vez o SQLite da primeira versão do painel (sem migrações)."""
@@ -91,6 +92,19 @@ class EnergyStore:
         """rows: [{device_id, ts, power_w, voltage_v, current_a}] — sem dedup."""
         if rows:
             self._q(insert(samples), rows)
+
+    # ------------------------------------------------------- tomadas aninhadas
+    def parents(self) -> dict[str, str]:
+        """device_id -> parent_id (a tomada de fora, cuja medição já inclui esta)."""
+        return dict(self._parents)
+
+    def set_parent(self, device_id: str, parent_id: str | None):
+        self._q(delete(device_parents).where(device_parents.c.device_id == device_id))
+        if parent_id:
+            self._q(insert(device_parents).values(device_id=device_id, parent_id=parent_id))
+            self._parents[device_id] = parent_id
+        else:
+            self._parents.pop(device_id, None)
 
     # ------------------------------------------------------------------ leitura
     def series(self, device_id: str, since: float, buckets: int = 96, width: float | None = None) -> dict:

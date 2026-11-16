@@ -45,6 +45,14 @@ energy_reports = Table(
     PrimaryKeyConstraint("device_id", "ts"),
 )
 
+# "esta tomada está ligada dentro de outra": o consumo dela já entra na medição da outra
+# (ex.: Ventilador numa régua ligada na tomada Quarto). Só a de fora entra nos totais.
+device_parents = Table(
+    "device_parents", metadata,
+    Column("device_id", String(64), primary_key=True),
+    Column("parent_id", String(64), nullable=False),
+)
+
 
 users = Table(
     "users", metadata,
