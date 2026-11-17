@@ -2,10 +2,37 @@
   "deploy": {
     "steps": [
       {
-        "name": "rebuild e sobe o tuya-dash",
+        "name": "imagem (só quando dependências, Dockerfile ou compose mudam)",
         "uses": "compose",
-        "args": ["up", "-d", "--build", "app"],
+        "args": [
+          "up",
+          "-d",
+          "--build",
+          "app"
+        ],
+        "when": [
+          "changed:requirements.txt",
+          "changed:Dockerfile",
+          "changed:docker-compose.yml"
+        ],
         "timeout": 1200
+      },
+      {
+        "name": "apaga a imagem anterior que ficou sem tag",
+        "run": "docker image prune -f --filter label=com.docker.compose.project=tuya-home",
+        "when": [
+          "changed:requirements.txt",
+          "changed:Dockerfile",
+          "changed:docker-compose.yml"
+        ]
+      },
+      {
+        "name": "reinicia com o código novo",
+        "uses": "restart",
+        "containers": [
+          "tuya-dash"
+        ],
+        "when": "code"
       }
     ]
   }

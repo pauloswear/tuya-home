@@ -13,10 +13,18 @@ services:
     env_file: .env
     environment:
       TUYA_DASH_DATA: /app/data
+      PYTHONDONTWRITEBYTECODE: "1"
     ports:
       - "8765:8765"
     volumes:
       - ./data:/app/data       # sessão Tuya (config.json) e SQLite de reserva
+      # Código montado do clone: deploy = git reset + restart, sem gerar imagem.
+      # A imagem só guarda o Python e as dependências e só é refeita quando
+      # requirements.txt, Dockerfile ou este compose mudam.
+      - ./app:/app/app:ro
+      - ./static:/app/static:ro
+      - ./migrations:/app/migrations:ro
+      - ./alembic.ini:/app/alembic.ini:ro
     # Para usar o MariaDB embutido abaixo, no .env defina MYSQL_HOST=db e MYSQL_PORT=3306.
 
   # MariaDB opcional (só sobe com: --profile db). Se você já tem um banco, ignore.
