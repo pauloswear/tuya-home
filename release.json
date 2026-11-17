@@ -1,0 +1,12 @@
+{
+  "deploy": {
+    "steps": [
+      {
+        "name": "rebuild e sobe o tuya-dash",
+        "uses": "compose",
+        "args": ["up", "-d", "--build", "app"],
+        "timeout": 1200
+      }
+    ]
+  }
+}
